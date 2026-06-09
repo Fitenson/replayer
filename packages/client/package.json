@@ -1,5 +1,5 @@
 {
-  "name": "replayer-client",
+  "name": "@fit10/replayer-client",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
