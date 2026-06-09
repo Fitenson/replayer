@@ -1,12 +1,17 @@
 export class Recorder {
   private events: any[] = [];
-  private endpoint = "https://toolkit-strict-homepage-trusts.trycloudflare.com";
+  private endpoint = "https://toolkit-strict-homepage-trusts.trycloudflare.com/reports";
+  private hasFlushedError = false;
 
   start() {
     window.addEventListener("click", this.handleClick);
     window.addEventListener("scroll", this.handleScroll);
 
-    window.addEventListener("error", () => this.flush({ status: "failed" }));
+    window.addEventListener("error", () => {
+      if (this.hasFlushedError) return;
+      this.hasFlushedError = true;
+      this.flush({ status: "failed" });
+    });
 
     setInterval(() => {
       this.flush({ status: "running" });
@@ -43,13 +48,14 @@ export class Recorder {
 
     this.events = [];
 
-    navigator.sendBeacon?.(
-      this.endpoint,
-      JSON.stringify(payload)
-    ) || fetch(this.endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(this.endpoint, JSON.stringify(payload));
+    } else {
+      await fetch(this.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
   }
 }
