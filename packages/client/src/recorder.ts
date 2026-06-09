@@ -1,6 +1,6 @@
 export class Recorder {
   private events: any[] = [];
-  private endpoint = "https://toolkit-strict-homepage-trusts.trycloudflare.com/reports";
+  private endpoint = "https://old-eastern-apparel-lone.trycloudflare.com/reports";
   private hasFlushedError = false;
 
   start() {
