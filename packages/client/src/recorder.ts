@@ -1,16 +1,16 @@
-import { ReplayEvent } from "./types/replayEvent";
-
 export class Recorder {
-  private events: ReplayEvent[] = [];
+  private events: any[] = [];
+  private endpoint = "https://toolkit-strict-homepage-trusts.trycloudflare.com";
 
   start() {
     window.addEventListener("click", this.handleClick);
     window.addEventListener("scroll", this.handleScroll);
-  }
 
-  stop() {
-    window.removeEventListener("click", this.handleClick);
-    window.removeEventListener("scroll", this.handleScroll);
+    window.addEventListener("error", () => this.flush({ status: "failed" }));
+
+    setInterval(() => {
+      this.flush({ status: "running" });
+    }, 5000);
   }
 
   private handleClick = (e: MouseEvent) => {
@@ -30,7 +30,26 @@ export class Recorder {
     });
   };
 
-  getEvents() {
-    return this.events;
+  private async flush(meta: any = {}) {
+    if (this.events.length === 0) return;
+
+    const payload = {
+      ...meta,
+      events: [...this.events],
+      consoleLogs: [],
+      networkLogs: [],
+      videoUrl: null
+    };
+
+    this.events = [];
+
+    navigator.sendBeacon?.(
+      this.endpoint,
+      JSON.stringify(payload)
+    ) || fetch(this.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
   }
 }
