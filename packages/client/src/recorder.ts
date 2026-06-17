@@ -1,6 +1,6 @@
 export class Recorder {
   private events: any[] = [];
-  private endpoint = "https://rand-rev-implement-heavily.trycloudflare.com/reports";
+  private endpoint = "https://friendly-yodel-4p995q6vxrwh7gj9-3000.app.github.dev/reports";
   private hasFlushedError = false;
 
   start() {
