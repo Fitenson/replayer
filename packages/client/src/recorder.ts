@@ -17,6 +17,9 @@ export class Recorder {
   // MutationObserver for DOM diffs
   private mutationObserver: MutationObserver | null = null;
 
+  // Periodic flush
+  private flushInterval: ReturnType<typeof setInterval> | null = null;
+
   start() {
     console.log("🔥 Recorder started");
 
@@ -55,9 +58,21 @@ export class Recorder {
         errorMessage: event.message
       });
     });
+
+    // Flush every 10 seconds so events aren't lost mid-session
+    this.flushInterval = setInterval(() => {
+      this.flush({ status: "inprogress" });
+    }, 10_000);
   }
 
   stop() {
+    if (this.flushInterval !== null) {
+      clearInterval(this.flushInterval);
+      this.flushInterval = null;
+    }
+
+    this.flush({ status: "stopped" });
+
     this.mutationObserver?.disconnect();
     document.removeEventListener("pointermove", this.handlePointerMove, true);
     document.removeEventListener("pointerdown", this.handlePointerDown, true);
@@ -119,7 +134,6 @@ export class Recorder {
             mutations.push({
               kind: "remove",
               path: this.getNodePath(record.target),
-              // serialise removed node so replay can reconstruct it
               html:
                 node.nodeType === Node.ELEMENT_NODE
                   ? (node as Element).outerHTML
@@ -134,7 +148,6 @@ export class Recorder {
                 node.nodeType === Node.ELEMENT_NODE
                   ? (node as Element).outerHTML
                   : node.textContent,
-              // Which sibling it was inserted before (null = appended)
               nextSiblingPath: record.nextSibling
                 ? this.getNodePath(record.nextSibling)
                 : null
@@ -211,7 +224,6 @@ export class Recorder {
       type: "mousemove",
       x: e.clientX,
       y: e.clientY,
-      // Normalised coords (0–1) so replay can scale to any viewport
       nx: e.clientX / window.innerWidth,
       ny: e.clientY / window.innerHeight,
       timestamp: now
@@ -239,8 +251,6 @@ export class Recorder {
       type: "click",
       x: e.clientX,
       y: e.clientY,
-      // Bounding rect lets the replay player draw a highlight ring
-      // around the exact element that was clicked
       targetRect: rect
         ? {
             top: rect.top,
@@ -263,15 +273,14 @@ export class Recorder {
     if (now - this.lastScrollAt < this.SCROLL_THROTTLE_MS) return;
     this.lastScrollAt = now;
 
-    // Works for both window and scrollable child elements
     const target = e.target as HTMLElement;
-    const isWindow = e.target === document || target === document.documentElement;
+    const isWindow =
+      e.target === document || target === document.documentElement;
 
     this.events.push({
       type: "scroll",
       scrollY: isWindow ? window.scrollY : target.scrollTop,
       scrollX: isWindow ? window.scrollX : target.scrollLeft,
-      // Let the replay player find the right scroll container
       path: isWindow ? null : this.getNodePath(target),
       timestamp: now
     });
@@ -284,7 +293,6 @@ export class Recorder {
   private handleKeyDown = (e: KeyboardEvent) => {
     this.events.push({
       type: "keydown",
-      // Avoid capturing passwords etc. — record printable key category only
       key: this.sanitiseKey(e.key),
       code: e.code,
       timestamp: Date.now()
@@ -314,7 +322,6 @@ export class Recorder {
       id: target?.id,
       name: target?.name,
       inputType: target?.type,
-      // Value length lets replay show a progress indicator without storing PII
       valueLength: target?.value?.length ?? 0,
       timestamp: Date.now()
     });
@@ -337,9 +344,6 @@ export class Recorder {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  /**
-   * Consistent target description used by click + pointerdown events.
-   */
   private describeTarget(target: HTMLElement | null) {
     if (!target) return {};
 
@@ -347,7 +351,6 @@ export class Recorder {
       tag: target.tagName,
       id: target.id || null,
       className: target.className || null,
-      // Human-readable label for the replay timeline
       label:
         target.getAttribute("aria-label") ||
         target.getAttribute("title") ||
