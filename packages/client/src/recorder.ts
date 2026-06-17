@@ -2,45 +2,64 @@ export class Recorder {
   private events: any[] = [];
   private endpoint =
     "https://friendly-yodel-4p995q6vxrwh7gj9-3000.app.github.dev/reports";
+
   private hasFlushedError = false;
+  private sessionStartedAt = Date.now();
 
   start() {
     console.log("🔥 Recorder started");
 
-    /**
-     * 🔥 Use DOCUMENT + CAPTURE PHASE (IMPORTANT FIX)
-     */
-    document.addEventListener("click", this.handleClick, true);
+    // Capture initial DOM snapshot
+    this.captureSnapshot();
+
     document.addEventListener("pointerdown", this.handlePointerDown, true);
+    document.addEventListener("click", this.handleClick, true);
     document.addEventListener("scroll", this.handleScroll, true);
     document.addEventListener("keydown", this.handleKeyDown, true);
     document.addEventListener("input", this.handleInput, true);
 
-    window.addEventListener("error", () => {
-      if (this.hasFlushedError) return;
-      this.hasFlushedError = true;
-      this.flush({ status: "failed" });
+    // Flush when page is closing
+    window.addEventListener("beforeunload", () => {
+      this.flush({ status: "completed" });
     });
 
-    /**
-     * FORCE FLUSH LOOP
-     */
-    setInterval(() => {
-      this.flush({ status: "running" });
-    }, 5000);
+    // Flush when tab becomes hidden
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        this.flush({ status: "backgrounded" });
+      }
+    });
 
-    /**
-     * DEBUG FLUSH
-     */
-    setTimeout(() => {
-      console.log("🚀 Initial force flush test");
-      this.flush({ status: "init-test" });
-    }, 2000);
+    // Flush on uncaught errors
+    window.addEventListener("error", (event) => {
+      if (this.hasFlushedError) return;
+
+      this.hasFlushedError = true;
+
+      this.flush({
+        status: "failed",
+        errorMessage: event.message
+      });
+    });
   }
 
   /**
-   * 🔥 Better than click (fires earlier + more reliable)
+   * Initial DOM snapshot
    */
+  private captureSnapshot() {
+    this.events.push({
+      type: "snapshot",
+      html: document.documentElement.outerHTML,
+      url: location.href,
+      title: document.title,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      timestamp: Date.now()
+    });
+  }
+
   private handlePointerDown = (e: PointerEvent) => {
     const target = e.target as HTMLElement;
 
@@ -56,9 +75,6 @@ export class Recorder {
     });
   };
 
-  /**
-   * Click fallback (still useful)
-   */
   private handleClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement;
 
@@ -77,13 +93,11 @@ export class Recorder {
     this.events.push({
       type: "scroll",
       scrollY: window.scrollY,
+      scrollX: window.scrollX,
       timestamp: Date.now()
     });
   };
 
-  /**
-   * 🔥 captures typing
-   */
   private handleKeyDown = (e: KeyboardEvent) => {
     this.events.push({
       type: "keydown",
@@ -93,30 +107,31 @@ export class Recorder {
     });
   };
 
-  /**
-   * 🔥 captures input changes (VERY IMPORTANT)
-   */
   private handleInput = (e: Event) => {
     const target = e.target as HTMLInputElement;
 
+    // Don't capture actual value yet
     this.events.push({
       type: "input",
-      value: target?.value,
-      name: target?.name,
-      id: target?.id,
       tag: target?.tagName,
+      id: target?.id,
+      name: target?.name,
+      inputType: target?.type,
       timestamp: Date.now()
     });
   };
 
   private async flush(meta: any = {}) {
-    console.log("📡 flush triggered", {
-      eventCount: this.events.length,
-      meta
-    });
+    if (this.events.length === 0) {
+      return;
+    }
 
     const payload = {
       ...meta,
+      startedAt: this.sessionStartedAt,
+      endedAt: Date.now(),
+      url: location.href,
+      title: document.title,
       events: [...this.events],
       consoleLogs: [],
       networkLogs: [],
@@ -126,7 +141,16 @@ export class Recorder {
     this.events = [];
 
     try {
-      console.log("📤 sending payload to:", this.endpoint);
+      // sendBeacon is ideal for page unload
+      if (navigator.sendBeacon) {
+        const blob = new Blob(
+          [JSON.stringify(payload)],
+          { type: "application/json" }
+        );
+
+        navigator.sendBeacon(this.endpoint, blob);
+        return;
+      }
 
       await fetch(this.endpoint, {
         method: "POST",
@@ -136,8 +160,6 @@ export class Recorder {
         body: JSON.stringify(payload),
         keepalive: true
       });
-
-      console.log("✅ flush sent successfully");
     } catch (err) {
       console.error("❌ flush failed:", err);
     }
