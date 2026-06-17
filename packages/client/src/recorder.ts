@@ -366,7 +366,7 @@ export class Recorder {
 
   private async flush(meta: any = {}) {
     if (this.events.length === 0) return;
-
+  
     const payload = {
       ...meta,
       startedAt: this.sessionStartedAt,
@@ -383,23 +383,15 @@ export class Recorder {
       networkLogs: [],
       videoUrl: null
     };
-
+  
     this.events = [];
-
+  
     try {
-      if (navigator.sendBeacon) {
-        const blob = new Blob([JSON.stringify(payload)], {
-          type: "application/json"
-        });
-        navigator.sendBeacon(this.endpoint, blob);
-        return;
-      }
-
       await fetch(this.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        keepalive: true
+        keepalive: true  // ← survives page unload, same as sendBeacon
       });
     } catch (err) {
       console.error("❌ flush failed:", err);
