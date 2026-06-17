@@ -1,9 +1,12 @@
 export class Recorder {
   private events: any[] = [];
-  private endpoint = "https://friendly-yodel-4p995q6vxrwh7gj9-3000.app.github.dev/reports";
+  private endpoint =
+    "https://friendly-yodel-4p995q6vxrwh7gj9-3000.app.github.dev/reports";
   private hasFlushedError = false;
 
   start() {
+    console.log("🔥 Recorder started");
+
     window.addEventListener("click", this.handleClick);
     window.addEventListener("scroll", this.handleScroll);
 
@@ -13,9 +16,16 @@ export class Recorder {
       this.flush({ status: "failed" });
     });
 
+    // FORCE FLUSH every 5 seconds (even with no events)
     setInterval(() => {
       this.flush({ status: "running" });
     }, 5000);
+
+    // 🔥 immediate test flush (VERY IMPORTANT FOR DEBUG)
+    setTimeout(() => {
+      console.log("🚀 Initial force flush test");
+      this.flush({ status: "init-test" });
+    }, 2000);
   }
 
   private handleClick = (e: MouseEvent) => {
@@ -36,7 +46,10 @@ export class Recorder {
   };
 
   private async flush(meta: any = {}) {
-    if (this.events.length === 0) return;
+    console.log("📡 flush triggered", {
+      eventCount: this.events.length,
+      meta
+    });
 
     const payload = {
       ...meta,
@@ -48,14 +61,21 @@ export class Recorder {
 
     this.events = [];
 
-    if (navigator.sendBeacon) {
-      navigator.sendBeacon(this.endpoint, JSON.stringify(payload));
-    } else {
+    try {
+      console.log("📤 sending payload to:", this.endpoint);
+
       await fetch(this.endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
+        keepalive: true
       });
+
+      console.log("✅ flush sent successfully");
+    } catch (err) {
+      console.error("❌ flush failed:", err);
     }
   }
 }
