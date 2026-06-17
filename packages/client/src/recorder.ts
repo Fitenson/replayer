@@ -6,36 +6,50 @@ export class Recorder {
   private hasFlushedError = false;
   private sessionStartedAt = Date.now();
 
+  // Cursor tracking — throttled to avoid event flood
+  private lastMouseMoveAt = 0;
+  private readonly MOUSE_THROTTLE_MS = 50;
+
+  // Scroll tracking — throttled
+  private lastScrollAt = 0;
+  private readonly SCROLL_THROTTLE_MS = 100;
+
+  // MutationObserver for DOM diffs
+  private mutationObserver: MutationObserver | null = null;
+
   start() {
     console.log("🔥 Recorder started");
 
-    // Capture initial DOM snapshot
     this.captureSnapshot();
+    this.startMutationObserver();
 
+    document.addEventListener("pointermove", this.handlePointerMove, {
+      capture: true,
+      passive: true
+    });
     document.addEventListener("pointerdown", this.handlePointerDown, true);
     document.addEventListener("click", this.handleClick, true);
-    document.addEventListener("scroll", this.handleScroll, true);
+    document.addEventListener("scroll", this.handleScroll, {
+      capture: true,
+      passive: true
+    });
     document.addEventListener("keydown", this.handleKeyDown, true);
     document.addEventListener("input", this.handleInput, true);
+    window.addEventListener("resize", this.handleResize, { passive: true });
 
-    // Flush when page is closing
     window.addEventListener("beforeunload", () => {
       this.flush({ status: "completed" });
     });
 
-    // Flush when tab becomes hidden
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         this.flush({ status: "backgrounded" });
       }
     });
 
-    // Flush on uncaught errors
     window.addEventListener("error", (event) => {
       if (this.hasFlushedError) return;
-
       this.hasFlushedError = true;
-
       this.flush({
         status: "failed",
         errorMessage: event.message
@@ -43,9 +57,21 @@ export class Recorder {
     });
   }
 
-  /**
-   * Initial DOM snapshot
-   */
+  stop() {
+    this.mutationObserver?.disconnect();
+    document.removeEventListener("pointermove", this.handlePointerMove, true);
+    document.removeEventListener("pointerdown", this.handlePointerDown, true);
+    document.removeEventListener("click", this.handleClick, true);
+    document.removeEventListener("scroll", this.handleScroll, true);
+    document.removeEventListener("keydown", this.handleKeyDown, true);
+    document.removeEventListener("input", this.handleInput, true);
+    window.removeEventListener("resize", this.handleResize);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Snapshot
+  // ---------------------------------------------------------------------------
+
   private captureSnapshot() {
     this.events.push({
       type: "snapshot",
@@ -56,9 +82,141 @@ export class Recorder {
         width: window.innerWidth,
         height: window.innerHeight
       },
+      scroll: {
+        x: window.scrollX,
+        y: window.scrollY
+      },
       timestamp: Date.now()
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // DOM mutations — gives the replay player enough to reconstruct page changes
+  // ---------------------------------------------------------------------------
+
+  private startMutationObserver() {
+    this.mutationObserver = new MutationObserver((records) => {
+      const mutations: any[] = [];
+
+      for (const record of records) {
+        if (record.type === "characterData") {
+          mutations.push({
+            kind: "text",
+            path: this.getNodePath(record.target),
+            value: record.target.textContent
+          });
+        } else if (record.type === "attributes") {
+          mutations.push({
+            kind: "attr",
+            path: this.getNodePath(record.target),
+            attr: record.attributeName,
+            value: (record.target as Element).getAttribute(
+              record.attributeName!
+            )
+          });
+        } else if (record.type === "childList") {
+          for (const node of Array.from(record.removedNodes)) {
+            mutations.push({
+              kind: "remove",
+              path: this.getNodePath(record.target),
+              // serialise removed node so replay can reconstruct it
+              html:
+                node.nodeType === Node.ELEMENT_NODE
+                  ? (node as Element).outerHTML
+                  : node.textContent
+            });
+          }
+          for (const node of Array.from(record.addedNodes)) {
+            mutations.push({
+              kind: "add",
+              path: this.getNodePath(record.target),
+              html:
+                node.nodeType === Node.ELEMENT_NODE
+                  ? (node as Element).outerHTML
+                  : node.textContent,
+              // Which sibling it was inserted before (null = appended)
+              nextSiblingPath: record.nextSibling
+                ? this.getNodePath(record.nextSibling)
+                : null
+            });
+          }
+        }
+      }
+
+      if (mutations.length > 0) {
+        this.events.push({
+          type: "mutation",
+          mutations,
+          timestamp: Date.now()
+        });
+      }
+    });
+
+    this.mutationObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+      attributeOldValue: false,
+      characterDataOldValue: false
+    });
+  }
+
+  /**
+   * Returns a stable CSS-selector-like path to a node so the replay player
+   * can locate it in the reconstructed DOM.
+   */
+  private getNodePath(node: Node): string {
+    const parts: string[] = [];
+    let current: Node | null = node;
+
+    while (current && current !== document.documentElement) {
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const el = current as Element;
+        let segment = el.tagName.toLowerCase();
+
+        if (el.id) {
+          segment += `#${el.id}`;
+          parts.unshift(segment);
+          break; // id is unique enough — stop here
+        }
+
+        const siblings = Array.from(el.parentNode?.children ?? []).filter(
+          (c) => c.tagName === el.tagName
+        );
+
+        if (siblings.length > 1) {
+          segment += `:nth-of-type(${siblings.indexOf(el) + 1})`;
+        }
+
+        parts.unshift(segment);
+      }
+
+      current = current.parentNode;
+    }
+
+    return parts.join(" > ");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pointer / mouse
+  // ---------------------------------------------------------------------------
+
+  private handlePointerMove = (e: PointerEvent) => {
+    const now = Date.now();
+    if (now - this.lastMouseMoveAt < this.MOUSE_THROTTLE_MS) return;
+    this.lastMouseMoveAt = now;
+
+    this.events.push({
+      type: "mousemove",
+      x: e.clientX,
+      y: e.clientY,
+      // Normalised coords (0–1) so replay can scale to any viewport
+      nx: e.clientX / window.innerWidth,
+      ny: e.clientY / window.innerHeight,
+      timestamp: now
+    });
+  };
 
   private handlePointerDown = (e: PointerEvent) => {
     const target = e.target as HTMLElement;
@@ -68,63 +226,143 @@ export class Recorder {
       x: e.clientX,
       y: e.clientY,
       button: e.button,
-      tag: target?.tagName,
-      id: target?.id,
-      className: target?.className,
+      ...this.describeTarget(target),
       timestamp: Date.now()
     });
   };
 
   private handleClick = (e: MouseEvent) => {
     const target = e.target as HTMLElement;
+    const rect = target?.getBoundingClientRect();
 
     this.events.push({
       type: "click",
       x: e.clientX,
       y: e.clientY,
-      tag: target?.tagName,
-      id: target?.id,
-      className: target?.className,
+      // Bounding rect lets the replay player draw a highlight ring
+      // around the exact element that was clicked
+      targetRect: rect
+        ? {
+            top: rect.top,
+            left: rect.left,
+            width: rect.width,
+            height: rect.height
+          }
+        : null,
+      ...this.describeTarget(target),
       timestamp: Date.now()
     });
   };
 
-  private handleScroll = () => {
+  // ---------------------------------------------------------------------------
+  // Scroll
+  // ---------------------------------------------------------------------------
+
+  private handleScroll = (e: Event) => {
+    const now = Date.now();
+    if (now - this.lastScrollAt < this.SCROLL_THROTTLE_MS) return;
+    this.lastScrollAt = now;
+
+    // Works for both window and scrollable child elements
+    const target = e.target as HTMLElement;
+    const isWindow = e.target === document || target === document.documentElement;
+
     this.events.push({
       type: "scroll",
-      scrollY: window.scrollY,
-      scrollX: window.scrollX,
-      timestamp: Date.now()
+      scrollY: isWindow ? window.scrollY : target.scrollTop,
+      scrollX: isWindow ? window.scrollX : target.scrollLeft,
+      // Let the replay player find the right scroll container
+      path: isWindow ? null : this.getNodePath(target),
+      timestamp: now
     });
   };
+
+  // ---------------------------------------------------------------------------
+  // Keyboard
+  // ---------------------------------------------------------------------------
 
   private handleKeyDown = (e: KeyboardEvent) => {
     this.events.push({
       type: "keydown",
-      key: e.key,
+      // Avoid capturing passwords etc. — record printable key category only
+      key: this.sanitiseKey(e.key),
       code: e.code,
       timestamp: Date.now()
     });
   };
 
+  /**
+   * Replaces printable characters with a placeholder so the replay shows
+   * _that_ the user typed without capturing actual keystrokes.
+   * Special keys (Enter, Backspace, Tab, arrows …) pass through as-is.
+   */
+  private sanitiseKey(key: string): string {
+    if (key.length === 1) return "[char]";
+    return key;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Input
+  // ---------------------------------------------------------------------------
+
   private handleInput = (e: Event) => {
     const target = e.target as HTMLInputElement;
 
-    // Don't capture actual value yet
     this.events.push({
       type: "input",
       tag: target?.tagName,
       id: target?.id,
       name: target?.name,
       inputType: target?.type,
+      // Value length lets replay show a progress indicator without storing PII
+      valueLength: target?.value?.length ?? 0,
       timestamp: Date.now()
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // Viewport resize
+  // ---------------------------------------------------------------------------
+
+  private handleResize = () => {
+    this.events.push({
+      type: "resize",
+      width: window.innerWidth,
+      height: window.innerHeight,
+      timestamp: Date.now()
+    });
+  };
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Consistent target description used by click + pointerdown events.
+   */
+  private describeTarget(target: HTMLElement | null) {
+    if (!target) return {};
+
+    return {
+      tag: target.tagName,
+      id: target.id || null,
+      className: target.className || null,
+      // Human-readable label for the replay timeline
+      label:
+        target.getAttribute("aria-label") ||
+        target.getAttribute("title") ||
+        target.textContent?.trim().slice(0, 80) ||
+        null,
+      path: this.getNodePath(target)
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Flush
+  // ---------------------------------------------------------------------------
+
   private async flush(meta: any = {}) {
-    if (this.events.length === 0) {
-      return;
-    }
+    if (this.events.length === 0) return;
 
     const payload = {
       ...meta,
@@ -132,6 +370,11 @@ export class Recorder {
       endedAt: Date.now(),
       url: location.href,
       title: document.title,
+      userAgent: navigator.userAgent,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
       events: [...this.events],
       consoleLogs: [],
       networkLogs: [],
@@ -141,22 +384,17 @@ export class Recorder {
     this.events = [];
 
     try {
-      // sendBeacon is ideal for page unload
       if (navigator.sendBeacon) {
-        const blob = new Blob(
-          [JSON.stringify(payload)],
-          { type: "application/json" }
-        );
-
+        const blob = new Blob([JSON.stringify(payload)], {
+          type: "application/json"
+        });
         navigator.sendBeacon(this.endpoint, blob);
         return;
       }
 
       await fetch(this.endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         keepalive: true
       });
